@@ -12,6 +12,8 @@ enum RemoteQuotaError: LocalizedError {
             return "登录已失效：在终端运行一次 \(command) 并登录后恢复"
         case .requestFailed:
             return "无法连接额度接口"
+        case .httpStatus(429):
+            return "额度接口暂时限流，稍后自动重试"
         case .httpStatus(let status):
             return "额度接口请求失败（HTTP \(status)）"
         case .invalidResponse:

@@ -10,7 +10,8 @@ CodexBar 是一个原生 macOS 菜单栏应用，同时显示 Codex、Claude Cod
 
 - 菜单栏并排显示三个工具的剩余百分比，例如 `Cx 99 · Cl 96 · Ag 100`，没有数据时显示 `--`
 - 下拉菜单显示 Codex 和 Claude Code 的套餐，以及各工具额度窗口的已用和剩余比例、重置时间及更新时间。agy 显示 Gemini 和 Claude/GPT 两组的每周额度和 5 小时额度
-- Codex 每 5 秒读取本地日志，Claude Code 每 60 秒查询额度，agy 每 5 分钟查询额度，也可点击“立即刷新”
+- Codex 每 5 秒读取本地日志，Claude Code 和 agy 每 5 分钟查询额度，也可点击“立即刷新”
+- Claude Code 或 agy 查询失败时，会继续显示上次成功取得的额度和更新时间，并注明失败原因
 - 支持 Codex 返回的主要/次要额度和额外点数
 - 自动识别 `~/.codex/sessions`，也支持 `CODEX_HOME`
 - 无 Dock 图标，原生 AppKit，macOS 13 及以上
