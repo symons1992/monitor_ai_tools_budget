@@ -39,19 +39,35 @@ enum QuotaKeychain {
         guard process.terminationStatus == 0, !data.isEmpty else {
             throw RemoteQuotaError.loginRequired(command)
         }
-        return data
+        return decodeOutput(data)
+    }
+
+    static func decodeOutput(_ data: Data) -> Data {
+        guard let output = String(data: data, encoding: .utf8) else { return data }
+        let hex = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !hex.isEmpty, hex.count.isMultiple(of: 2),
+              hex.allSatisfy({ $0.isASCII && $0.isHexDigit }) else {
+            return data
+        }
+
+        var decoded = Data()
+        var index = hex.startIndex
+        while index < hex.endIndex {
+            let end = hex.index(index, offsetBy: 2)
+            guard let byte = UInt8(hex[index..<end], radix: 16) else { return data }
+            decoded.append(byte)
+            index = end
+        }
+        return decoded
     }
 }
 
 enum RemoteQuotaRequest {
     private static let session: URLSession = {
         let configuration = URLSessionConfiguration.ephemeral
-        configuration.urlCache = nil
-        configuration.urlCredentialStorage = nil
-        configuration.httpShouldSetCookies = false
         configuration.timeoutIntervalForRequest = 15
         configuration.timeoutIntervalForResource = 30
-        return URLSession(configuration: configuration, delegate: RejectRedirects(), delegateQueue: nil)
+        return URLSession(configuration: configuration)
     }()
 
     static func send(_ request: URLRequest, command: String) async throws -> Data {
@@ -87,18 +103,6 @@ enum RemoteQuotaRequest {
             return try decoder.decode(type, from: data)
         } catch {
             throw RemoteQuotaError.invalidResponse
-        }
-    }
-
-    private final class RejectRedirects: NSObject, URLSessionTaskDelegate {
-        func urlSession(
-            _ session: URLSession,
-            task: URLSessionTask,
-            willPerformHTTPRedirection response: HTTPURLResponse,
-            newRequest request: URLRequest,
-            completionHandler: @escaping (URLRequest?) -> Void
-        ) {
-            completionHandler(nil)
         }
     }
 }

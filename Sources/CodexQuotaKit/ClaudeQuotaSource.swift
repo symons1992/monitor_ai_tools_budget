@@ -28,8 +28,8 @@ public struct ClaudeQuotaSource: Sendable {
         let usage = try RemoteQuotaRequest.decode(Usage.self, from: data)
         return ClaudeQuota(
             planType: planType,
-            fiveHour: try usage.fiveHour?.quotaWindow(minutes: 300),
-            sevenDay: try usage.sevenDay?.quotaWindow(minutes: 10_080),
+            fiveHour: usage.fiveHour?.quotaWindow(minutes: 300),
+            sevenDay: usage.sevenDay?.quotaWindow(minutes: 10_080),
             observedAt: Date()
         )
     }
@@ -53,9 +53,8 @@ public struct ClaudeQuotaSource: Sendable {
                 case resetsAt = "resets_at"
             }
 
-            func quotaWindow(minutes: Int) throws -> QuotaWindow {
-                guard (0...100).contains(utilization) else { throw RemoteQuotaError.invalidResponse }
-                return QuotaWindow(usedPercent: utilization, windowMinutes: minutes, resetsAt: resetsAt)
+            func quotaWindow(minutes: Int) -> QuotaWindow {
+                QuotaWindow(usedPercent: utilization, windowMinutes: minutes, resetsAt: resetsAt)
             }
         }
 
@@ -65,15 +64,6 @@ public struct ClaudeQuotaSource: Sendable {
         enum CodingKeys: String, CodingKey {
             case fiveHour = "five_hour"
             case sevenDay = "seven_day"
-        }
-
-        init(from decoder: Decoder) throws {
-            let values = try decoder.container(keyedBy: CodingKeys.self)
-            guard values.contains(.fiveHour) || values.contains(.sevenDay) else {
-                throw RemoteQuotaError.invalidResponse
-            }
-            fiveHour = try values.decodeIfPresent(Window.self, forKey: .fiveHour)
-            sevenDay = try values.decodeIfPresent(Window.self, forKey: .sevenDay)
         }
     }
 }

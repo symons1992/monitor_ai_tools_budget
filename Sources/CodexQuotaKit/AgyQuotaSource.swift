@@ -1,4 +1,3 @@
-import CryptoKit
 import Foundation
 
 public struct AgyQuota: Sendable {
@@ -11,6 +10,23 @@ public struct AgyQuota: Sendable {
         public let window: String
         public let remainingFraction: Double
         public let resetTime: Date?
+
+        init(window: String, remainingFraction: Double, resetTime: Date?) {
+            self.window = window
+            self.remainingFraction = remainingFraction
+            self.resetTime = resetTime
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case window, remainingFraction, resetTime
+        }
+
+        public init(from decoder: Decoder) throws {
+            let values = try decoder.container(keyedBy: CodingKeys.self)
+            window = try values.decode(String.self, forKey: .window)
+            remainingFraction = try values.decodeIfPresent(Double.self, forKey: .remainingFraction) ?? 0
+            resetTime = try values.decodeIfPresent(Date.self, forKey: .resetTime)
+        }
 
         public var quotaWindow: QuotaWindow {
             let minutes: Int?
@@ -32,50 +48,25 @@ public struct AgyQuota: Sendable {
     }
 }
 
-public actor AgyQuotaSource {
-    private var cachedProject: (tokenDigest: SHA256.Digest, project: Project)?
-
+public struct AgyQuotaSource: Sendable {
     public init() {}
 
     public func latestQuota() async throws -> AgyQuota {
         let credentials = try QuotaKeychain.read(["-s", "gemini", "-a", "antigravity"], command: "agy")
         let accessToken = try Self.decodeAccessToken(credentials)
-        let tokenDigest = SHA256.hash(data: Data(accessToken.utf8))
-        let project: Project
-        if let cachedProject, cachedProject.tokenDigest == tokenDigest {
-            project = cachedProject.project
-        } else {
-            let body = #"{"metadata":{"ideType":"ANTIGRAVITY","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}}"#
-            let response = try await Self.post("loadCodeAssist", body: Data(body.utf8), accessToken: accessToken)
-            project = try RemoteQuotaRequest.decode(Project.self, from: response)
-            guard !project.cloudaicompanionProject.isEmpty else { throw RemoteQuotaError.invalidResponse }
-            cachedProject = (tokenDigest, project)
-        }
+        let metadata = #"{"metadata":{"ideType":"ANTIGRAVITY","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}}"#
+        let response = try await Self.post("loadCodeAssist", body: Data(metadata.utf8), accessToken: accessToken)
+        let project = try RemoteQuotaRequest.decode(Project.self, from: response)
+        guard !project.cloudaicompanionProject.isEmpty else { throw RemoteQuotaError.invalidResponse }
 
         let body = try JSONEncoder().encode(QuotaRequest(project: project.cloudaicompanionProject))
         let planType = project.paidTier?.name ?? project.currentTier?.name
         async let summaryResponse = Self.post("retrieveUserQuotaSummary", body: body, accessToken: accessToken)
-        async let modelsResponse = Self.post(
-            "fetchAvailableModels", body: body, accessToken: accessToken, userAgent: "antigravity"
-        )
+        async let modelsResponse = Self.post("fetchAvailableModels", body: body, accessToken: accessToken)
 
-        let summary: Result<AgyQuota, Error>
-        do {
-            summary = .success(try Self.parseUsage(await summaryResponse, planType: planType))
-        } catch {
-            if case RemoteQuotaError.loginRequired = error { throw error }
-            summary = .failure(error)
-        }
-
-        let geminiGroup: AgyQuota.Group?
-        do {
-            geminiGroup = try Self.parseGeminiGroup(await modelsResponse)
-        } catch {
-            if case RemoteQuotaError.loginRequired = error { throw error }
-            return try summary.get()
-        }
-
-        let groups = (geminiGroup.map { [$0] } ?? []) + ((try? summary.get().groups) ?? [])
+        let summary = try Self.parseUsage(await summaryResponse, planType: planType)
+        let geminiGroup = try Self.parseGeminiGroup(await modelsResponse)
+        let groups = (geminiGroup.map { [$0] } ?? []) + summary.groups
         return AgyQuota(planType: planType, groups: groups, observedAt: Date())
     }
 
@@ -93,20 +84,12 @@ public actor AgyQuotaSource {
 
     static func parseUsage(_ data: Data, planType: String?) throws -> AgyQuota {
         let usage = try RemoteQuotaRequest.decode(Usage.self, from: data)
-        guard usage.groups.allSatisfy({ group in
-            group.buckets.allSatisfy { (0...1).contains($0.remainingFraction) }
-        }) else {
-            throw RemoteQuotaError.invalidResponse
-        }
         return AgyQuota(planType: planType, groups: usage.groups, observedAt: Date())
     }
 
     static func parseGeminiGroup(_ data: Data) throws -> AgyQuota.Group? {
         let models = try RemoteQuotaRequest.decode(AvailableModels.self, from: data).models
         let quotas = models.values.compactMap(\.quotaInfo).filter { $0.resetTime != nil }
-        guard quotas.allSatisfy({ (0...1).contains($0.remainingFraction) }) else {
-            throw RemoteQuotaError.invalidResponse
-        }
         guard let quota = quotas.min(by: { $0.remainingFraction < $1.remainingFraction }) else {
             return nil
         }
@@ -114,16 +97,12 @@ public actor AgyQuotaSource {
         return AgyQuota.Group(displayName: "Gemini 模型", buckets: [bucket])
     }
 
-    private static func post(
-        _ endpoint: String, body: Data, accessToken: String, userAgent: String? = nil
-    ) async throws -> Data {
+    private static func post(_ endpoint: String, body: Data, accessToken: String) async throws -> Data {
         var request = URLRequest(url: URL(string: "https://daily-cloudcode-pa.googleapis.com/v1internal:\(endpoint)")!)
         request.httpMethod = "POST"
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        if let userAgent {
-            request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
-        }
+        request.setValue("antigravity", forHTTPHeaderField: "User-Agent")
         request.httpBody = body
         return try await RemoteQuotaRequest.send(request, command: "agy")
     }
@@ -161,8 +140,15 @@ public actor AgyQuotaSource {
     private struct AvailableModels: Decodable {
         struct Model: Decodable {
             struct QuotaInfo: Decodable {
-                let remainingFraction: Double
+                private let reportedRemainingFraction: Double?
                 let resetTime: Date?
+
+                var remainingFraction: Double { reportedRemainingFraction ?? 0 }
+
+                private enum CodingKeys: String, CodingKey {
+                    case reportedRemainingFraction = "remainingFraction"
+                    case resetTime
+                }
             }
 
             let quotaInfo: QuotaInfo?

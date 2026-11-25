@@ -31,7 +31,14 @@ final class RemoteQuotaSourceTests: XCTestCase {
         let emptyQuota = try ClaudeQuotaSource.parseUsage(empty, planType: nil)
         XCTAssertNil(emptyQuota.fiveHour)
         XCTAssertNil(emptyQuota.sevenDay)
-        XCTAssertThrowsError(try ClaudeQuotaSource.parseUsage(Data("{}".utf8), planType: nil))
+    }
+
+    func testDecodesHexKeychainOutput() {
+        let output = Data("  7b00Ff7D\n".utf8)
+        XCTAssertEqual(QuotaKeychain.decodeOutput(output), Data([0x7B, 0x00, 0xFF, 0x7D]))
+
+        let plainText = Data("{\"sample\":true}\n".utf8)
+        XCTAssertEqual(QuotaKeychain.decodeOutput(plainText), plainText)
     }
 
     func testDecodesAgyKeychainEntry() throws {
@@ -132,5 +139,33 @@ final class RemoteQuotaSourceTests: XCTestCase {
         XCTAssertEqual(bucket.resetTime, reset)
         let quota = AgyQuota(planType: nil, groups: [group], observedAt: Date())
         XCTAssertEqual(try XCTUnwrap(quota.minimumRemainingPercent), 97.75935, accuracy: 0.000001)
+    }
+
+    func testAgyDefaultsMissingRemainingFractionToZero() throws {
+        let summary = """
+        {
+          "groups": [{
+            "displayName": "Other models",
+            "buckets": [{ "window": "5h", "resetTime": "2026-11-25T16:44:56Z" }]
+          }]
+        }
+        """
+        let usage = try AgyQuotaSource.parseUsage(Data(summary.utf8), planType: nil)
+        let bucket = try XCTUnwrap(usage.groups.first?.buckets.first)
+        XCTAssertEqual(bucket.remainingFraction, 0)
+
+        let models = """
+        {
+          "models": {
+            "gemini-3-flash": {
+              "modelProvider": "MODEL_PROVIDER_GOOGLE",
+              "quotaInfo": { "resetTime": "2026-11-25T16:44:56Z" }
+            }
+          }
+        }
+        """
+        let group = try XCTUnwrap(AgyQuotaSource.parseGeminiGroup(Data(models.utf8)))
+        let geminiBucket = try XCTUnwrap(group.buckets.first)
+        XCTAssertEqual(geminiBucket.remainingFraction, 0)
     }
 }
