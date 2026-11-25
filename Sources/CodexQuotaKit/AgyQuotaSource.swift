@@ -66,11 +66,7 @@ public struct AgyQuotaSource: Sendable {
             "/opt/homebrew/bin/agy",
             "/usr/local/bin/agy"
         ]
-        let executable = candidates.first { path in
-            var isDirectory: ObjCBool = false
-            return fileManager.fileExists(atPath: path, isDirectory: &isDirectory)
-                && !isDirectory.boolValue && fileManager.isExecutableFile(atPath: path)
-        }
+        let executable = candidates.first(where: fileManager.isExecutableFile(atPath:))
         guard let executable else {
             throw UsageError.commandNotFound
         }
@@ -87,6 +83,11 @@ public struct AgyQuotaSource: Sendable {
             try process.run()
         } catch {
             throw UsageError.unreadableUsage
+        }
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 30) {
+            if process.isRunning {
+                process.terminate()
+            }
         }
         let data = output.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
