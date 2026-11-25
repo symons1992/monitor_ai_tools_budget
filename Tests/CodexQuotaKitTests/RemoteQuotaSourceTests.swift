@@ -41,131 +41,83 @@ final class RemoteQuotaSourceTests: XCTestCase {
         XCTAssertEqual(QuotaKeychain.decodeOutput(plainText), plainText)
     }
 
-    func testDecodesAgyKeychainEntry() throws {
-        let json = """
-        {
-          "token": {
-            "access_token": "sample-access-token",
-            "token_type": "Bearer",
-            "refresh_token": "sample-refresh-token",
-            "expiry": "2026-11-25T20:44:47.622986+08:00",
-            "expires_in": 3599
-          },
-          "auth_method": "consumer",
-          "id_token_email": "example@example.com"
-        }
-        """
-        let entry = "go-keyring-base64:\(Data(json.utf8).base64EncodedString())\n"
-
-        XCTAssertEqual(try AgyQuotaSource.decodeAccessToken(Data(entry.utf8)), "sample-access-token")
-        XCTAssertThrowsError(try AgyQuotaSource.decodeAccessToken(Data(json.utf8)))
-    }
-
     func testParsesAgyUsage() throws {
         let json = """
         {
-          "groups": [
-            {
-              "buckets": [
-                { "bucketId": "3p-weekly", "displayName": "Weekly Limit Remaining", "window": "weekly", "remainingFraction": 1 },
-                { "bucketId": "3p-5h", "displayName": "Five Hour Limit Remaining", "window": "5h", "remainingFraction": 1 }
-              ],
-              "displayName": "Claude and GPT models",
-              "description": "Models within this group: Claude Opus 5.5, Claude Sonnet 5.5, GPT-OSS 120B"
-            },
-            {
-              "buckets": [
-                { "window": "daily", "remainingFraction": 0.625, "resetTime": "2026-11-25T20:44:47+08:00" }
-              ],
-              "displayName": "Other models"
+          "conversation_id": "",
+          "status": "SUCCESS",
+          "response": "…",
+          "command": {
+            "name": "usage",
+            "data": {
+              "description": "…",
+              "groups": [
+                {
+                  "name": "Gemini Models",
+                  "description": "…",
+                  "buckets": [
+                    { "id": "gemini-weekly", "name": "Weekly Limit Remaining", "window": "weekly", "remaining_fraction": 0.9118912816047668, "reset_time": "2026-12-02T11:44:56Z" },
+                    { "id": "gemini-5h", "name": "Five Hour Limit Remaining", "window": "5h", "remaining_fraction": 0.6775651574134827, "reset_time": "2026-11-25T16:44:56Z" }
+                  ]
+                },
+                {
+                  "name": "Claude and GPT models",
+                  "buckets": [
+                    { "id": "3p-weekly", "name": "Weekly Limit Remaining", "window": "weekly", "remaining_fraction": 1, "reset_time": "1970-01-01T00:00:00Z" },
+                    { "id": "3p-5h", "name": "Five Hour Limit Remaining", "window": "5h", "remaining_fraction": 1, "reset_time": "1970-01-01T00:00:00Z" }
+                  ]
+                }
+              ]
             }
-          ],
-          "description": "..."
-        }
-        """
-        let quota = try AgyQuotaSource.parseUsage(Data(json.utf8), planType: "Google AI Pro")
-
-        XCTAssertEqual(quota.planType, "Google AI Pro")
-        XCTAssertEqual(quota.groups.map(\.displayName), ["Claude and GPT models", "Other models"])
-        let sampleBuckets = try XCTUnwrap(quota.groups.first?.buckets)
-        XCTAssertEqual(sampleBuckets.map { $0.quotaWindow.windowMinutes }, [10_080, 300])
-        XCTAssertEqual(sampleBuckets.map { $0.quotaWindow.remainingPercent }, [100, 100])
-        XCTAssertTrue(sampleBuckets.allSatisfy { $0.resetTime == nil })
-        let daily = try XCTUnwrap(quota.groups.last?.buckets.first)
-        XCTAssertEqual(daily.window, "daily")
-        XCTAssertNil(daily.quotaWindow.windowMinutes)
-        let reset = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-11-25T12:44:47Z"))
-        XCTAssertEqual(daily.resetTime, reset)
-        XCTAssertEqual(daily.quotaWindow.usedPercent, 37.5)
-        XCTAssertEqual(quota.minimumRemainingPercent, 62.5)
-    }
-
-    func testParsesAgyGeminiQuota() throws {
-        let json = """
-        {
-          "models": {
-            "gemini-3-flash": {
-              "displayName": "Gemini 3 Flash",
-              "modelProvider": "MODEL_PROVIDER_GOOGLE",
-              "quotaInfo": { "remainingFraction": 0.9775935, "resetTime": "2026-11-25T16:44:56Z" }
-            },
-            "gemini-3.5-flash-lite": {
-              "displayName": "Gemini 3.5 Flash Lite",
-              "modelProvider": "MODEL_PROVIDER_GOOGLE",
-              "quotaInfo": { "remainingFraction": 0.9775935, "resetTime": "2026-11-25T16:44:56Z" }
-            },
-            "tab_flash_lite_preview": {
-              "modelProvider": "MODEL_PROVIDER_GOOGLE",
-              "quotaInfo": { "remainingFraction": 1 }
-            },
-            "claude-opus-5-5-high": {
-              "displayName": "Claude Opus 5.5 (High)",
-              "modelProvider": "MODEL_PROVIDER_ANTHROPIC",
-              "quotaInfo": { "remainingFraction": 1, "resetTime": "2026-11-25T17:50:23Z" }
-            },
-            "gemini-without-quota": { "modelProvider": "MODEL_PROVIDER_GOOGLE" }
           }
         }
         """
-        let group = try XCTUnwrap(AgyQuotaSource.parseGeminiGroup(Data(json.utf8)))
-        let bucket = try XCTUnwrap(group.buckets.first)
-        let reset = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-11-25T16:44:56Z"))
+        let quota = try AgyQuotaSource.parseUsage(Data(json.utf8))
 
-        XCTAssertEqual(group.displayName, "Gemini 模型")
-        XCTAssertEqual(group.buckets.count, 1)
-        XCTAssertEqual(bucket.window, "额度")
-        XCTAssertNil(bucket.quotaWindow.windowMinutes)
-        XCTAssertEqual(bucket.remainingFraction, 0.9775935)
-        XCTAssertEqual(bucket.resetTime, reset)
-        let quota = AgyQuota(planType: nil, groups: [group], observedAt: Date())
-        XCTAssertEqual(try XCTUnwrap(quota.minimumRemainingPercent), 97.75935, accuracy: 0.000001)
+        XCTAssertEqual(quota.groups.map(\.displayName), ["Gemini Models", "Claude and GPT models"])
+        let gemini = try XCTUnwrap(quota.groups.first)
+        let thirdParty = try XCTUnwrap(quota.groups.last)
+        XCTAssertEqual(gemini.buckets.map { $0.quotaWindow.windowMinutes }, [10_080, 300])
+        XCTAssertEqual(thirdParty.buckets.map { $0.quotaWindow.windowMinutes }, [10_080, 300])
+        let weekly = try XCTUnwrap(gemini.buckets.first)
+        let reset = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-12-02T11:44:56Z"))
+        XCTAssertEqual(weekly.remainingFraction, 0.9118912816047668)
+        XCTAssertEqual(weekly.quotaWindow.resetsAt, reset)
+        XCTAssertEqual(thirdParty.buckets.map { $0.quotaWindow.remainingPercent }, [100, 100])
+        XCTAssertTrue(thirdParty.buckets.allSatisfy { $0.quotaWindow.resetsAt == nil })
+        XCTAssertEqual(try XCTUnwrap(quota.minimumRemainingPercent), 67.75651574134827, accuracy: 0.000001)
     }
 
     func testAgyDefaultsMissingRemainingFractionToZero() throws {
-        let summary = """
+        let json = """
         {
-          "groups": [{
-            "displayName": "Other models",
-            "buckets": [{ "window": "5h", "resetTime": "2026-11-25T16:44:56Z" }]
-          }]
+          "status": "SUCCESS",
+          "command": { "data": { "groups": [{
+            "name": "Gemini Models",
+            "buckets": [{ "window": "5h", "reset_time": "2026-11-25T16:44:56.125Z" }]
+          }] } }
         }
         """
-        let usage = try AgyQuotaSource.parseUsage(Data(summary.utf8), planType: nil)
-        let bucket = try XCTUnwrap(usage.groups.first?.buckets.first)
-        XCTAssertEqual(bucket.remainingFraction, 0)
+        let quota = try AgyQuotaSource.parseUsage(Data(json.utf8))
+        let bucket = try XCTUnwrap(quota.groups.first?.buckets.first)
+        let reset = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-11-25T16:44:56Z"))
 
-        let models = """
-        {
-          "models": {
-            "gemini-3-flash": {
-              "modelProvider": "MODEL_PROVIDER_GOOGLE",
-              "quotaInfo": { "resetTime": "2026-11-25T16:44:56Z" }
+        XCTAssertEqual(bucket.remainingFraction, 0)
+        XCTAssertEqual(bucket.resetTime, reset.addingTimeInterval(0.125))
+        XCTAssertEqual(quota.minimumRemainingPercent, 0)
+    }
+
+    func testRejectsInvalidAgyUsage() {
+        let invalidResponses = [
+            #"{"status":"ERROR","error":"internal error"}"#,
+            #"{"status":"ERROR","command":{"data":{"groups":[]}}}"#,
+            #"{"status":"SUCCESS","command":{"data":{}}}"#,
+            "not JSON"
+        ]
+        for response in invalidResponses {
+            XCTAssertThrowsError(try AgyQuotaSource.parseUsage(Data(response.utf8)), response) { error in
+                XCTAssertEqual(error.localizedDescription, "无法读取 agy 额度：在终端运行一次 agy 确认已登录")
             }
-          }
         }
-        """
-        let group = try XCTUnwrap(AgyQuotaSource.parseGeminiGroup(Data(models.utf8)))
-        let geminiBucket = try XCTUnwrap(group.buckets.first)
-        XCTAssertEqual(geminiBucket.remainingFraction, 0)
     }
 }

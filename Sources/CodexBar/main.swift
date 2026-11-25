@@ -9,7 +9,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private let agySource = AgyQuotaSource()
     private let worker = DispatchQueue(label: "com.codexbar.quota-reader", qos: .utility)
     private var codexTimer: Timer?
-    private var onlineTimer: Timer?
+    private var claudeTimer: Timer?
+    private var agyTimer: Timer?
     private var latestQuota: CodexQuota?
     private var latestError: Error?
     private var claudeResult: Result<ClaudeQuota, Error>?
@@ -43,22 +44,32 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             userInfo: nil,
             repeats: true
         )
-        let onlineTimer = Timer.scheduledTimer(
+        let claudeTimer = Timer.scheduledTimer(
             timeInterval: 60,
             target: self,
-            selector: #selector(refreshOnline),
+            selector: #selector(refreshClaude),
+            userInfo: nil,
+            repeats: true
+        )
+        let agyTimer = Timer.scheduledTimer(
+            timeInterval: 5 * 60,
+            target: self,
+            selector: #selector(refreshAgy),
             userInfo: nil,
             repeats: true
         )
         self.codexTimer = codexTimer
-        self.onlineTimer = onlineTimer
+        self.claudeTimer = claudeTimer
+        self.agyTimer = agyTimer
         RunLoop.main.add(codexTimer, forMode: .common)
-        RunLoop.main.add(onlineTimer, forMode: .common)
+        RunLoop.main.add(claudeTimer, forMode: .common)
+        RunLoop.main.add(agyTimer, forMode: .common)
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         codexTimer?.invalidate()
-        onlineTimer?.invalidate()
+        claudeTimer?.invalidate()
+        agyTimer?.invalidate()
     }
 
     func menuWillOpen(_ menu: NSMenu) {
@@ -67,7 +78,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
 
     @objc private func refresh() {
         refreshCodex()
-        refreshOnline()
+        refreshClaude()
+        refreshAgy()
     }
 
     @objc private func refreshCodex() {
@@ -91,30 +103,31 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         }
     }
 
-    @objc private func refreshOnline() {
-        if !isRefreshingClaude {
-            isRefreshingClaude = true
-            Task { @MainActor in
-                do {
-                    claudeResult = .success(try await claudeSource.latestQuota())
-                } catch {
-                    claudeResult = .failure(error)
-                }
-                isRefreshingClaude = false
-                updateDisplay()
+    @objc private func refreshClaude() {
+        guard !isRefreshingClaude else { return }
+        isRefreshingClaude = true
+        Task { @MainActor in
+            do {
+                claudeResult = .success(try await claudeSource.latestQuota())
+            } catch {
+                claudeResult = .failure(error)
             }
+            isRefreshingClaude = false
+            updateDisplay()
         }
-        if !isRefreshingAgy {
-            isRefreshingAgy = true
-            Task { @MainActor in
-                do {
-                    agyResult = .success(try await agySource.latestQuota())
-                } catch {
-                    agyResult = .failure(error)
-                }
-                isRefreshingAgy = false
-                updateDisplay()
+    }
+
+    @objc private func refreshAgy() {
+        guard !isRefreshingAgy else { return }
+        isRefreshingAgy = true
+        Task { @MainActor in
+            do {
+                agyResult = .success(try await agySource.latestQuota())
+            } catch {
+                agyResult = .failure(error)
             }
+            isRefreshingAgy = false
+            updateDisplay()
         }
     }
 
@@ -233,7 +246,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private func addAgyDetails(to menu: NSMenu) {
         switch agyResult {
         case .success(let quota):
-            addPlan(quota.planType, to: menu)
             for group in quota.groups {
                 addHeading(group.displayName, fontSize: NSFont.smallSystemFontSize, to: menu)
                 for bucket in group.buckets {
@@ -296,7 +308,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         alert.informativeText = """
         Codex 的额度每 5 秒从本机任务日志的 rate_limits 字段读取。
 
-        Claude 和 agy 的额度每 60 秒查询一次。agy 包含 Gemini 模型的额度。CodexBar 从钥匙串读取各自 CLI 的登录令牌，仅发送给各自的额度接口。令牌不落盘、不写日志。
+        Claude 的额度每 60 秒查询一次。CodexBar 从钥匙串读取 Claude Code 的登录令牌，仅发送给 Claude 的额度接口。令牌不落盘、不写日志。
+
+        agy 的额度每 5 分钟通过本机 agy 命令的 /usage 获取。CodexBar 不读取 agy 的登录凭据。点击“立即刷新”可手动查询。
 
         菜单栏显示剩余百分比。Codex 取主要额度，Claude 优先取 5 小时额度，agy 取所有窗口中剩余比例最低的一项。
         """
