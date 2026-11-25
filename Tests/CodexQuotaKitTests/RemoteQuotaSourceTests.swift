@@ -92,4 +92,45 @@ final class RemoteQuotaSourceTests: XCTestCase {
         XCTAssertEqual(daily.quotaWindow.usedPercent, 37.5)
         XCTAssertEqual(quota.minimumRemainingPercent, 62.5)
     }
+
+    func testParsesAgyGeminiQuota() throws {
+        let json = """
+        {
+          "models": {
+            "gemini-3-flash": {
+              "displayName": "Gemini 3 Flash",
+              "modelProvider": "MODEL_PROVIDER_GOOGLE",
+              "quotaInfo": { "remainingFraction": 0.9775935, "resetTime": "2026-11-25T16:44:56Z" }
+            },
+            "gemini-3.5-flash-lite": {
+              "displayName": "Gemini 3.5 Flash Lite",
+              "modelProvider": "MODEL_PROVIDER_GOOGLE",
+              "quotaInfo": { "remainingFraction": 0.9775935, "resetTime": "2026-11-25T16:44:56Z" }
+            },
+            "tab_flash_lite_preview": {
+              "modelProvider": "MODEL_PROVIDER_GOOGLE",
+              "quotaInfo": { "remainingFraction": 1 }
+            },
+            "claude-opus-5-5-high": {
+              "displayName": "Claude Opus 5.5 (High)",
+              "modelProvider": "MODEL_PROVIDER_ANTHROPIC",
+              "quotaInfo": { "remainingFraction": 1, "resetTime": "2026-11-25T17:50:23Z" }
+            },
+            "gemini-without-quota": { "modelProvider": "MODEL_PROVIDER_GOOGLE" }
+          }
+        }
+        """
+        let group = try XCTUnwrap(AgyQuotaSource.parseGeminiGroup(Data(json.utf8)))
+        let bucket = try XCTUnwrap(group.buckets.first)
+        let reset = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-11-25T16:44:56Z"))
+
+        XCTAssertEqual(group.displayName, "Gemini 模型")
+        XCTAssertEqual(group.buckets.count, 1)
+        XCTAssertEqual(bucket.window, "额度")
+        XCTAssertNil(bucket.quotaWindow.windowMinutes)
+        XCTAssertEqual(bucket.remainingFraction, 0.9775935)
+        XCTAssertEqual(bucket.resetTime, reset)
+        let quota = AgyQuota(planType: nil, groups: [group], observedAt: Date())
+        XCTAssertEqual(try XCTUnwrap(quota.minimumRemainingPercent), 97.75935, accuracy: 0.000001)
+    }
 }

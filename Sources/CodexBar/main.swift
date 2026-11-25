@@ -94,7 +94,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     @objc private func refreshOnline() {
         if !isRefreshingClaude {
             isRefreshingClaude = true
-            Task {
+            Task { @MainActor in
                 do {
                     claudeResult = .success(try await claudeSource.latestQuota())
                 } catch {
@@ -106,7 +106,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         }
         if !isRefreshingAgy {
             isRefreshingAgy = true
-            Task {
+            Task { @MainActor in
                 do {
                     agyResult = .success(try await agySource.latestQuota())
                 } catch {
@@ -296,7 +296,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         alert.informativeText = """
         Codex 的额度每 5 秒从本机任务日志的 rate_limits 字段读取。
 
-        Claude 和 agy 的额度每 60 秒查询一次。CodexBar 从钥匙串读取各自 CLI 的登录令牌，仅发送给各自的额度接口。令牌不落盘、不写日志。
+        Claude 和 agy 的额度每 60 秒查询一次。agy 包含 Gemini 模型的额度。CodexBar 从钥匙串读取各自 CLI 的登录令牌，仅发送给各自的额度接口。令牌不落盘、不写日志。
 
         菜单栏显示剩余百分比。Codex 取主要额度，Claude 优先取 5 小时额度，agy 取所有窗口中剩余比例最低的一项。
         """

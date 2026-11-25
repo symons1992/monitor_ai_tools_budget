@@ -53,8 +53,30 @@ public actor AgyQuotaSource {
         }
 
         let body = try JSONEncoder().encode(QuotaRequest(project: project.cloudaicompanionProject))
-        let response = try await Self.post("retrieveUserQuotaSummary", body: body, accessToken: accessToken)
-        return try Self.parseUsage(response, planType: project.paidTier?.name ?? project.currentTier?.name)
+        let planType = project.paidTier?.name ?? project.currentTier?.name
+        async let summaryResponse = Self.post("retrieveUserQuotaSummary", body: body, accessToken: accessToken)
+        async let modelsResponse = Self.post(
+            "fetchAvailableModels", body: body, accessToken: accessToken, userAgent: "antigravity"
+        )
+
+        let summary: Result<AgyQuota, Error>
+        do {
+            summary = .success(try Self.parseUsage(await summaryResponse, planType: planType))
+        } catch {
+            if case RemoteQuotaError.loginRequired = error { throw error }
+            summary = .failure(error)
+        }
+
+        let geminiGroup: AgyQuota.Group?
+        do {
+            geminiGroup = try Self.parseGeminiGroup(await modelsResponse)
+        } catch {
+            if case RemoteQuotaError.loginRequired = error { throw error }
+            return try summary.get()
+        }
+
+        let groups = (geminiGroup.map { [$0] } ?? []) + ((try? summary.get().groups) ?? [])
+        return AgyQuota(planType: planType, groups: groups, observedAt: Date())
     }
 
     static func decodeAccessToken(_ data: Data) throws -> String {
@@ -79,11 +101,29 @@ public actor AgyQuotaSource {
         return AgyQuota(planType: planType, groups: usage.groups, observedAt: Date())
     }
 
-    private static func post(_ endpoint: String, body: Data, accessToken: String) async throws -> Data {
+    static func parseGeminiGroup(_ data: Data) throws -> AgyQuota.Group? {
+        let models = try RemoteQuotaRequest.decode(AvailableModels.self, from: data).models
+        let quotas = models.values.compactMap(\.quotaInfo).filter { $0.resetTime != nil }
+        guard quotas.allSatisfy({ (0...1).contains($0.remainingFraction) }) else {
+            throw RemoteQuotaError.invalidResponse
+        }
+        guard let quota = quotas.min(by: { $0.remainingFraction < $1.remainingFraction }) else {
+            return nil
+        }
+        let bucket = AgyQuota.Bucket(window: "额度", remainingFraction: quota.remainingFraction, resetTime: quota.resetTime)
+        return AgyQuota.Group(displayName: "Gemini 模型", buckets: [bucket])
+    }
+
+    private static func post(
+        _ endpoint: String, body: Data, accessToken: String, userAgent: String? = nil
+    ) async throws -> Data {
         var request = URLRequest(url: URL(string: "https://daily-cloudcode-pa.googleapis.com/v1internal:\(endpoint)")!)
         request.httpMethod = "POST"
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let userAgent {
+            request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        }
         request.httpBody = body
         return try await RemoteQuotaRequest.send(request, command: "agy")
     }
@@ -116,5 +156,32 @@ public actor AgyQuotaSource {
 
     private struct Usage: Decodable {
         let groups: [AgyQuota.Group]
+    }
+
+    private struct AvailableModels: Decodable {
+        struct Model: Decodable {
+            struct QuotaInfo: Decodable {
+                let remainingFraction: Double
+                let resetTime: Date?
+            }
+
+            let quotaInfo: QuotaInfo?
+
+            enum CodingKeys: String, CodingKey {
+                case modelProvider
+                case quotaInfo
+            }
+
+            init(from decoder: Decoder) throws {
+                let values = try decoder.container(keyedBy: CodingKeys.self)
+                if try values.decodeIfPresent(String.self, forKey: .modelProvider) == "MODEL_PROVIDER_GOOGLE" {
+                    quotaInfo = try values.decodeIfPresent(QuotaInfo.self, forKey: .quotaInfo)
+                } else {
+                    quotaInfo = nil
+                }
+            }
+        }
+
+        let models: [String: Model]
     }
 }
