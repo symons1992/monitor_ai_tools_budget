@@ -2,9 +2,9 @@
 
 CodexBar 是一个原生 macOS 菜单栏应用，同时显示 Codex、Claude Code 和 Google Antigravity CLI（agy）的剩余额度。
 
-## 早期版本界面预览
+## 效果预览
 
-![早期版本的 Codex 额度界面](./example.png)
+![CodexBar 同时显示 Codex、Claude 和 agy 的额度](./example.png)
 
 ## 功能
 
