@@ -5,11 +5,19 @@ import Foundation
 private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let scanner = SessionLogScanner()
+    private let claudeSource = ClaudeQuotaSource()
+    private let agySource = AgyQuotaSource()
     private let worker = DispatchQueue(label: "com.codexbar.quota-reader", qos: .utility)
-    private var timer: Timer?
+    private var codexTimer: Timer?
+    private var claudeTimer: Timer?
+    private var agyTimer: Timer?
     private var latestQuota: CodexQuota?
     private var latestError: Error?
-    private var isRefreshing = false
+    private var claudeResult: Result<ClaudeQuota, Error>?
+    private var agyResult: Result<AgyQuota, Error>?
+    private var isRefreshingCodex = false
+    private var isRefreshingClaude = false
+    private var isRefreshingAgy = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -17,46 +25,72 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         if let button = statusItem.button {
             button.image = NSImage(
                 systemSymbolName: "terminal.fill",
-                accessibilityDescription: "Codex 额度"
+                accessibilityDescription: "Codex、Claude 和 agy 额度"
             )
             button.imagePosition = .imageLeading
-            button.title = " --"
-            button.toolTip = "Codex 使用额度"
+            button.toolTip = "Codex、Claude 和 agy 剩余额度（%）"
         }
 
         let menu = NSMenu()
         menu.delegate = self
         statusItem.menu = menu
-        rebuildMenu()
+        updateDisplay()
         refresh()
 
-        timer = Timer.scheduledTimer(
+        let codexTimer = Timer.scheduledTimer(
             timeInterval: 5,
             target: self,
-            selector: #selector(refresh),
+            selector: #selector(refreshCodex),
             userInfo: nil,
             repeats: true
         )
-        RunLoop.main.add(timer!, forMode: .common)
+        let claudeTimer = Timer.scheduledTimer(
+            timeInterval: 60,
+            target: self,
+            selector: #selector(refreshClaude),
+            userInfo: nil,
+            repeats: true
+        )
+        let agyTimer = Timer.scheduledTimer(
+            timeInterval: 5 * 60,
+            target: self,
+            selector: #selector(refreshAgy),
+            userInfo: nil,
+            repeats: true
+        )
+        self.codexTimer = codexTimer
+        self.claudeTimer = claudeTimer
+        self.agyTimer = agyTimer
+        RunLoop.main.add(codexTimer, forMode: .common)
+        RunLoop.main.add(claudeTimer, forMode: .common)
+        RunLoop.main.add(agyTimer, forMode: .common)
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        timer?.invalidate()
+        codexTimer?.invalidate()
+        claudeTimer?.invalidate()
+        agyTimer?.invalidate()
     }
 
     func menuWillOpen(_ menu: NSMenu) {
-        refresh()
+        refreshCodex()
     }
 
     @objc private func refresh() {
-        guard !isRefreshing else { return }
-        isRefreshing = true
+        refreshCodex()
+        refreshClaude()
+        refreshAgy()
+    }
+
+    @objc private func refreshCodex() {
+        guard !isRefreshingCodex else { return }
+        isRefreshingCodex = true
         worker.async { [weak self] in
             guard let self else { return }
             let result = Result { try self.scanner.latestQuota() }
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
-                self.isRefreshing = false
+                self.isRefreshingCodex = false
                 switch result {
                 case .success(let quota):
                     self.latestQuota = quota
@@ -64,74 +98,67 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                 case .failure(let error):
                     self.latestError = error
                 }
-                self.updateStatusItem()
-                self.rebuildMenu()
+                self.updateDisplay()
             }
         }
     }
 
-    private func updateStatusItem() {
-        guard let button = statusItem.button else { return }
-        guard let window = latestQuota?.primary ?? latestQuota?.secondary else {
-            button.title = " --"
-            button.toolTip = latestError?.localizedDescription ?? "等待 Codex 额度数据"
-            return
+    @objc private func refreshClaude() {
+        guard !isRefreshingClaude else { return }
+        isRefreshingClaude = true
+        Task { @MainActor in
+            do {
+                claudeResult = .success(try await claudeSource.latestQuota())
+            } catch {
+                claudeResult = .failure(error)
+            }
+            isRefreshingClaude = false
+            updateDisplay()
         }
+    }
 
-        let remaining = Int(window.remainingPercent.rounded())
-        button.title = " \(remaining)%"
-        button.toolTip = "Codex 剩余额度 \(remaining)%"
+    @objc private func refreshAgy() {
+        guard !isRefreshingAgy else { return }
+        isRefreshingAgy = true
+        Task { @MainActor in
+            do {
+                agyResult = .success(try await agySource.latestQuota())
+            } catch {
+                agyResult = .failure(error)
+            }
+            isRefreshingAgy = false
+            updateDisplay()
+        }
+    }
+
+    private func updateDisplay() {
+        let codex = latestQuota?.primary ?? latestQuota?.secondary
+        let claude = try? claudeResult?.get()
+        let claudeWindow = claude?.fiveHour ?? claude?.sevenDay
+        let agy = try? agyResult?.get()
+        let codexPercent = Self.titlePercentage(codex?.remainingPercent)
+        let claudePercent = Self.titlePercentage(claudeWindow?.remainingPercent)
+        let agyPercent = Self.titlePercentage(agy?.minimumRemainingPercent)
+        statusItem.button?.title = "Cx \(codexPercent) · Cl \(claudePercent) · Ag \(agyPercent)"
+        rebuildMenu()
     }
 
     private func rebuildMenu() {
         guard let menu = statusItem.menu else { return }
         menu.removeAllItems()
 
-        let heading = NSMenuItem(title: "Codex 使用额度", action: nil, keyEquivalent: "")
-        heading.isEnabled = false
-        menu.addItem(heading)
+        addHeading("Codex", to: menu)
+        addCodexDetails(to: menu)
+        menu.addItem(.separator())
+        addHeading("Claude", to: menu)
+        addClaudeDetails(to: menu)
+        menu.addItem(.separator())
+        addHeading("agy", to: menu)
+        addAgyDetails(to: menu)
         menu.addItem(.separator())
 
-        if let quota = latestQuota {
-            if let plan = quota.planType, !plan.isEmpty {
-                addDisabledItem("套餐：\(plan.uppercased())", to: menu)
-            }
-            if let primary = quota.primary {
-                addWindow(primary, fallbackName: "主要额度", to: menu)
-            }
-            if let secondary = quota.secondary {
-                addWindow(secondary, fallbackName: "次要额度", to: menu)
-            }
-            if let credits = quota.credits {
-                let creditText: String
-                if credits.unlimited {
-                    creditText = "额外点数：不限量"
-                } else if credits.hasCredits {
-                    creditText = "额外点数：\(credits.balance ?? "可用")"
-                } else {
-                    creditText = "额外点数：无"
-                }
-                addDisabledItem(creditText, to: menu)
-            }
-            if quota.spendControlReached == true {
-                addDisabledItem("⚠︎ 已达到支出上限", to: menu)
-            }
-            if let reached = quota.rateLimitReachedType {
-                addDisabledItem("⚠︎ 已触发额度限制：\(reached)", to: menu)
-            }
-            addDisabledItem("更新：\(Self.relativeDateFormatter.localizedString(for: quota.observedAt, relativeTo: Date()))", to: menu)
-        } else {
-            addDisabledItem(latestError?.localizedDescription ?? "正在读取 Codex 数据…", to: menu)
-        }
-
-        menu.addItem(.separator())
-        let refreshItem = NSMenuItem(
-            title: isRefreshing ? "正在刷新…" : "立即刷新",
-            action: #selector(refresh),
-            keyEquivalent: "r"
-        )
+        let refreshItem = NSMenuItem(title: "立即刷新", action: #selector(refresh), keyEquivalent: "r")
         refreshItem.target = self
-        refreshItem.isEnabled = !isRefreshing
         menu.addItem(refreshItem)
 
         let logsItem = NSMenuItem(
@@ -160,6 +187,101 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         menu.addItem(quitItem)
     }
 
+    private func addCodexDetails(to menu: NSMenu) {
+        if let quota = latestQuota {
+            addPlan(quota.planType?.uppercased(), to: menu)
+            if let primary = quota.primary {
+                addWindow(primary, fallbackName: "主要额度", to: menu)
+            }
+            if let secondary = quota.secondary {
+                addWindow(secondary, fallbackName: "次要额度", to: menu)
+            }
+            if let credits = quota.credits {
+                let creditText: String
+                if credits.unlimited {
+                    creditText = "额外点数：不限量"
+                } else if credits.hasCredits {
+                    creditText = "额外点数：\(credits.balance ?? "可用")"
+                } else {
+                    creditText = "额外点数：无"
+                }
+                addDisabledItem(creditText, to: menu)
+            }
+            if quota.spendControlReached == true {
+                addDisabledItem("⚠︎ 已达到支出上限", to: menu)
+            }
+            if let reached = quota.rateLimitReachedType {
+                addDisabledItem("⚠︎ 已触发额度限制：\(reached)", to: menu)
+            }
+            addUpdate(quota.observedAt, to: menu)
+        }
+        if let latestError {
+            addDisabledItem(latestError.localizedDescription, to: menu)
+        } else if latestQuota == nil {
+            addDisabledItem("正在读取 Codex 数据…", to: menu)
+        }
+    }
+
+    private func addClaudeDetails(to menu: NSMenu) {
+        switch claudeResult {
+        case .success(let quota):
+            addPlan(quota.planType?.uppercased(), to: menu)
+            if let window = quota.fiveHour {
+                addWindow(window, fallbackName: "5 小时额度", to: menu)
+            }
+            if let window = quota.sevenDay {
+                addWindow(window, fallbackName: "每周额度", to: menu)
+            }
+            if quota.fiveHour == nil && quota.sevenDay == nil {
+                addDisabledItem("暂无额度数据", to: menu)
+            }
+            addUpdate(quota.observedAt, to: menu)
+        case .failure(let error):
+            addDisabledItem(error.localizedDescription, to: menu)
+        case nil:
+            addDisabledItem("正在读取 Claude 数据…", to: menu)
+        }
+    }
+
+    private func addAgyDetails(to menu: NSMenu) {
+        switch agyResult {
+        case .success(let quota):
+            for group in quota.groups {
+                addHeading(group.displayName, fontSize: NSFont.smallSystemFontSize, to: menu)
+                for bucket in group.buckets {
+                    addWindow(bucket.quotaWindow, fallbackName: bucket.window, to: menu)
+                }
+            }
+            if quota.minimumRemainingPercent == nil {
+                addDisabledItem("暂无额度数据", to: menu)
+            }
+            addUpdate(quota.observedAt, to: menu)
+        case .failure(let error):
+            addDisabledItem(error.localizedDescription, to: menu)
+        case nil:
+            addDisabledItem("正在读取 agy 数据…", to: menu)
+        }
+    }
+
+    private func addPlan(_ plan: String?, to menu: NSMenu) {
+        let name = plan.flatMap { $0.isEmpty ? nil : $0 } ?? "未知"
+        addDisabledItem("套餐：\(name)", to: menu)
+    }
+
+    private func addUpdate(_ date: Date, to menu: NSMenu) {
+        addDisabledItem("更新：\(Self.relativeDateFormatter.localizedString(for: date, relativeTo: Date()))", to: menu)
+    }
+
+    private func addHeading(_ title: String, fontSize: CGFloat = NSFont.systemFontSize, to menu: NSMenu) {
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        item.attributedTitle = NSAttributedString(
+            string: title,
+            attributes: [.font: NSFont.boldSystemFont(ofSize: fontSize)]
+        )
+        item.isEnabled = false
+        menu.addItem(item)
+    }
+
     private func addWindow(_ window: QuotaWindow, fallbackName: String, to menu: NSMenu) {
         let label = Self.windowLabel(minutes: window.windowMinutes) ?? fallbackName
         let used = Self.percentage(window.usedPercent)
@@ -183,7 +305,15 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     @objc private func showAbout() {
         let alert = NSAlert()
         alert.messageText = "CodexBar 的数据从哪里来？"
-        alert.informativeText = "CodexBar 每 5 秒只读扫描本机 Codex 任务日志中的 rate_limits 字段。它不会解析、显示或存储对话正文，不会读取登录凭据，也不会向网络发送任何数据。\n\n菜单栏显示的是主要统计窗口的剩余百分比。"
+        alert.informativeText = """
+        Codex 的额度每 5 秒从本机任务日志的 rate_limits 字段读取。
+
+        Claude 的额度每 60 秒查询一次。CodexBar 从钥匙串读取 Claude Code 的登录令牌，仅发送给 Claude 的额度接口。令牌不落盘、不写日志。
+
+        agy 的额度每 5 分钟通过本机 agy 命令的 /usage 获取。CodexBar 不读取 agy 的登录凭据。点击“立即刷新”可手动查询。
+
+        菜单栏显示剩余百分比。Codex 取主要额度，Claude 优先取 5 小时额度，agy 取所有窗口中剩余比例最低的一项。
+        """
         alert.alertStyle = .informational
         alert.addButton(withTitle: "知道了")
         NSApp.activate(ignoringOtherApps: true)
@@ -192,6 +322,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
 
     @objc private func quit() {
         NSApp.terminate(nil)
+    }
+
+    private static func titlePercentage(_ value: Double?) -> String {
+        guard let value else { return "--" }
+        return String(Int(value.rounded()))
     }
 
     private static func percentage(_ value: Double) -> String {
